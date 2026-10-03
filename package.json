@@ -6,14 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "lint": "oxlint src api vite.config.ts",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
+    "@google/genai": "^2.27.0",
     "file-saver": "^2.0.5",
     "jszip": "^3.10.2",
     "lucide-react": "^1.51.0",
+    "nitro": "^3.0.260903-beta",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

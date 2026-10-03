@@ -1,32 +1,49 @@
-# React + TypeScript + Vite
+# PolyPacker
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+PolyPacker creates an Arcade config from an asset prompt and packages it with a
+mock `.glb` placeholder in a ZIP. Gemini generates the config; the 3D model
+remains mocked.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Create `.env.local` in the project root:
 
-## React Compiler
+   ```env
+   GEMINI_API_KEY=your_gemini_api_key
+   ```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+   Keep this server-only variable as `GEMINI_API_KEY`; do not prefix it with
+   `VITE_`. `.env.local` is ignored by Git.
+2. Install dependencies and start Vite:
 
-## Expanding the Oxlint configuration
+   ```sh
+   bun install
+   bun run dev
+   ```
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+The Nitro route and Vite app run together in the same dev server. The route
+rejects prompts longer than 500 characters and returns a validated Arcade
+config before the app enables ZIP download.
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+## Deployment
+
+The Vite + Nitro setup can deploy to Vercel. Import the repository and add
+`GEMINI_API_KEY` under the project's Environment Variables, then deploy. Do not
+add the key to frontend build variables or source control.
+
+Vercel Hobby is free for personal, non-commercial demos. This deployment has a
+public generation endpoint with no sign-in, so anyone who can reach it can use
+the Gemini project's quota. The prompt-length limit does not prevent repeated
+requests; configure and monitor the Gemini project's quota.
+
+Google's Gemini Free Tier has usage limits and may use submitted prompts and
+outputs to improve its products. The Interactions API retains data for one day
+by default on the Free Tier. Do not submit sensitive information.
+
+## Checks
+
+```sh
+bun run test
+bun run lint
+bun run build
 ```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

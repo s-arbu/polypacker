@@ -15,30 +15,75 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { saveAs } from 'file-saver'
-import { arcadeConfig, createArcadeBundle } from './arcadeBundle'
+import { createArcadeBundle } from './arcadeBundle'
+import { isArcadeConfig, type ArcadeConfig } from './arcadeConfig'
 
 type GenerationState = 'idle' | 'loading' | 'success'
+const maximumPromptLength = 500
 
 function App() {
   const [prompt, setPrompt] = useState('')
+  const [arcadeConfig, setArcadeConfig] = useState<ArcadeConfig | null>(null)
   const [generationState, setGenerationState] =
     useState<GenerationState>('idle')
   const [promptError, setPromptError] = useState('')
+  const [generationError, setGenerationError] = useState('')
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState('')
 
-  function generateBundle(event: React.FormEvent<HTMLFormElement>) {
+  async function generateBundle(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
     if (!prompt.trim()) {
       setPromptError('Enter an asset prompt to get started.')
       return
     }
+    if (prompt.trim().length > maximumPromptLength) {
+      setPromptError(
+        `Asset prompts must be ${maximumPromptLength} characters or fewer.`,
+      )
+      return
+    }
 
     setPromptError('')
+    setGenerationError('')
     setDownloadError('')
+    setArcadeConfig(null)
     setGenerationState('loading')
-    window.setTimeout(() => setGenerationState('success'), 2000)
+
+    try {
+      const response = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt.trim() }),
+      })
+      const result: unknown = await response.json()
+
+      if (!response.ok) {
+        const message =
+          typeof result === 'object' &&
+          result !== null &&
+          'error' in result &&
+          typeof result.error === 'string'
+            ? result.error
+            : 'Could not generate the Arcade config. Please try again.'
+        throw new Error(message)
+      }
+      if (!isArcadeConfig(result)) {
+        throw new Error('The server returned an invalid Arcade config.')
+      }
+
+      setArcadeConfig(result)
+      setGenerationState('success')
+    } catch (error) {
+      console.error('Unable to generate the Arcade config.', error)
+      setGenerationError(
+        error instanceof Error
+          ? error.message
+          : 'Could not generate the Arcade config. Please try again.',
+      )
+      setGenerationState('idle')
+    }
   }
 
   async function downloadBundle() {
@@ -46,7 +91,10 @@ function App() {
     setDownloadError('')
 
     try {
-      const bundle = await createArcadeBundle()
+      if (!arcadeConfig) {
+        throw new Error('No generated Arcade config is available.')
+      }
+      const bundle = await createArcadeBundle(arcadeConfig)
       saveAs(bundle, 'asset-bundle.zip')
     } catch (error) {
       console.error('Unable to create the Arcade asset bundle.', error)
@@ -72,13 +120,13 @@ function App() {
           <div className="flex items-center gap-3">
             <span className="hidden items-center gap-2 rounded-full border border-amber-300/15 bg-amber-300/[0.06] px-3 py-1.5 text-[10px] font-semibold tracking-[0.16em] text-amber-200/80 sm:flex">
               <span className="size-1.5 rounded-full bg-amber-300" />
-              MOCK ENVIRONMENT
+              MOCK MODEL · GEMINI CONFIG
             </span>
             <button
               type="button"
               className="icon-button"
               aria-label="About this demo"
-              title="This demo uses placeholder generation data."
+              title="Gemini generates the Arcade config; the 3D model is a placeholder."
             >
               <CircleHelp size={18} aria-hidden="true" />
             </button>
@@ -96,8 +144,8 @@ function App() {
             Arcade-Ready Asset Booster
           </h1>
           <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-400 sm:text-base">
-            From a spark of an idea to a game-ready asset bundle. Generate a
-            model and the gameplay metadata your engine needs.
+            From a spark of an idea to a game-ready asset bundle. Generate
+            gameplay metadata while your 3D model stays mocked.
           </p>
         </section>
 
@@ -128,20 +176,27 @@ function App() {
                 className="prompt-input min-h-36 w-full resize-y rounded-xl p-4 text-sm leading-6 text-slate-100 placeholder:text-slate-600 focus:outline-none sm:min-h-40"
                 placeholder="Explosive Cyberpunk Barrel"
                 value={prompt}
+                maxLength={maximumPromptLength}
                 onChange={(event) => {
                   setPrompt(event.target.value)
                   if (promptError) setPromptError('')
+                  if (generationError) setGenerationError('')
                 }}
                 disabled={generationState === 'loading'}
               />
               <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                <span>Describe the asset you want to bring into your game.</span>
-                <span>{prompt.length} characters</span>
+                <span>Describe the asset (up to 500 characters).</span>
+                <span>{prompt.length}/500</span>
               </div>
 
               {promptError && (
                 <p className="mt-3 text-xs text-rose-300" role="alert">
                   {promptError}
+                </p>
+              )}
+              {generationError && (
+                <p className="mt-3 text-xs text-rose-300" role="alert">
+                  {generationError}
                 </p>
               )}
 
@@ -188,8 +243,9 @@ function App() {
             <div className="mt-6 flex flex-1 flex-col">
               {generationState === 'idle' && <IdleOutput />}
               {generationState === 'loading' && <LoadingOutput />}
-              {generationState === 'success' && (
+              {generationState === 'success' && arcadeConfig && (
                 <SuccessOutput
+                  arcadeConfig={arcadeConfig}
                   isDownloading={isDownloading}
                   downloadError={downloadError}
                   onDownload={downloadBundle}
@@ -202,10 +258,10 @@ function App() {
         <footer className="mt-7 flex flex-col items-start justify-between gap-3 border-t border-white/[0.07] pt-5 text-[11px] text-slate-500 sm:flex-row sm:items-center">
           <p className="flex items-center gap-2">
             <ShieldCheck size={14} className="text-emerald-400/80" aria-hidden="true" />
-            Built for fast iteration. No model or API calls are made.
+            Gemini generates the Arcade config; the 3D model remains mocked.
           </p>
           <p className="font-semibold tracking-[0.12em] text-slate-600">
-            MOCK-FIRST PIPELINE · V1.0
+            MOCK 3D · GEMINI CONFIG
           </p>
         </footer>
       </main>
@@ -275,14 +331,14 @@ function LoadingOutput() {
         />
       </div>
       <p className="text-sm font-medium text-white">
-        Generating 3D Mesh &amp; Engine Metadata...
+        Generating Arcade config...
       </p>
       <p className="mt-2 text-xs text-slate-500">
-        Building your mock asset and Arcade config
+        Preparing the mock model and your gameplay metadata
       </p>
       <div className="mt-7 flex items-center gap-3">
         <span className="loading-step loading-step-active">
-          <Cuboid size={13} aria-hidden="true" /> MESH
+          <Cuboid size={13} aria-hidden="true" /> MOCK GLB
         </span>
         <span className="h-px w-8 bg-white/10" />
         <span className="loading-step">
@@ -298,12 +354,14 @@ function LoadingOutput() {
 }
 
 type SuccessOutputProps = {
+  arcadeConfig: ArcadeConfig
   isDownloading: boolean
   downloadError: string
   onDownload: () => void
 }
 
 function SuccessOutput({
+  arcadeConfig,
   isDownloading,
   downloadError,
   onDownload,
