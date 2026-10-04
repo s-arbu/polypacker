@@ -17,15 +17,23 @@ import {
 import { saveAs } from 'file-saver'
 import { createArcadeBundle } from './arcadeBundle'
 import { isArcadeConfig, type ArcadeConfig } from './arcadeConfig'
+import { getMockModelPath } from './demoModel'
 
 type GenerationState = 'idle' | 'loading' | 'success'
+type LoadingStep = 'config' | 'model'
 const maximumPromptLength = 500
+const demoModelLatencyMs = 3_000
 
 function App() {
   const [prompt, setPrompt] = useState('')
   const [arcadeConfig, setArcadeConfig] = useState<ArcadeConfig | null>(null)
+  const [demoModel, setDemoModel] = useState<{
+    blob: Blob
+    path: string
+  } | null>(null)
   const [generationState, setGenerationState] =
     useState<GenerationState>('idle')
+  const [loadingStep, setLoadingStep] = useState<LoadingStep>('config')
   const [promptError, setPromptError] = useState('')
   const [generationError, setGenerationError] = useState('')
   const [isDownloading, setIsDownloading] = useState(false)
@@ -49,6 +57,8 @@ function App() {
     setGenerationError('')
     setDownloadError('')
     setArcadeConfig(null)
+    setDemoModel(null)
+    setLoadingStep('config')
     setGenerationState('loading')
 
     try {
@@ -73,14 +83,35 @@ function App() {
         throw new Error('The server returned an invalid Arcade config.')
       }
 
+      setLoadingStep('model')
+      const modelPath = getMockModelPath(prompt.trim())
+      const modelFetch = fetch(modelPath)
+      const minimumLatency = new Promise<void>((resolve) => {
+        setTimeout(resolve, demoModelLatencyMs)
+      })
+      const modelResponse = await modelFetch
+      if (!modelResponse.ok) {
+        throw new Error(
+          `Could not fetch the selected demo model (${modelResponse.status}).`,
+        )
+      }
+      const [model] = await Promise.all([
+        modelResponse.blob(),
+        minimumLatency,
+      ])
+      if (!model || model.size === 0) {
+        throw new Error('Could not fetch the selected demo model.')
+      }
+      setDemoModel({ blob: model, path: modelPath })
+
       setArcadeConfig(result)
       setGenerationState('success')
     } catch (error) {
-      console.error('Unable to generate the Arcade config.', error)
+      console.error('Unable to generate the asset bundle.', error)
       setGenerationError(
         error instanceof Error
           ? error.message
-          : 'Could not generate the Arcade config. Please try again.',
+          : 'Could not generate the asset bundle. Please try again.',
       )
       setGenerationState('idle')
     }
@@ -94,7 +125,15 @@ function App() {
       if (!arcadeConfig) {
         throw new Error('No generated Arcade config is available.')
       }
-      const bundle = await createArcadeBundle(arcadeConfig)
+      if (!demoModel) throw new Error('No demo model is available.')
+      const modelName = demoModel.path.split('/').at(-1)
+      if (!modelName) throw new Error('The selected demo model has no filename.')
+      const bundle = await createArcadeBundle(
+        arcadeConfig,
+        demoModel.blob,
+        modelName,
+        demoModel.path,
+      )
       saveAs(bundle, 'asset-bundle.zip')
     } catch (error) {
       console.error('Unable to create the Arcade asset bundle.', error)
@@ -120,13 +159,13 @@ function App() {
           <div className="flex items-center gap-3">
             <span className="hidden items-center gap-2 rounded-full border border-amber-300/15 bg-amber-300/[0.06] px-3 py-1.5 text-[10px] font-semibold tracking-[0.16em] text-amber-200/80 sm:flex">
               <span className="size-1.5 rounded-full bg-amber-300" />
-              MOCK MODEL · GEMINI CONFIG
+              DEMO MODEL · GEMINI CONFIG
             </span>
             <button
               type="button"
               className="icon-button"
               aria-label="About this demo"
-              title="Gemini generates the Arcade config; the 3D model is a placeholder."
+              title="Gemini generates the Arcade config; a prompt-matched demo model is selected locally."
             >
               <CircleHelp size={18} aria-hidden="true" />
             </button>
@@ -145,7 +184,7 @@ function App() {
           </h1>
           <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-400 sm:text-base">
             From a spark of an idea to a game-ready asset bundle. Generate
-            gameplay metadata while your 3D model stays mocked.
+            gameplay metadata while a matching demo model is prepared.
           </p>
         </section>
 
@@ -242,10 +281,13 @@ function App() {
 
             <div className="mt-6 flex flex-1 flex-col">
               {generationState === 'idle' && <IdleOutput />}
-              {generationState === 'loading' && <LoadingOutput />}
+              {generationState === 'loading' && (
+                <LoadingOutput step={loadingStep} />
+              )}
               {generationState === 'success' && arcadeConfig && (
                 <SuccessOutput
                   arcadeConfig={arcadeConfig}
+                  demoModelPath={demoModel?.path ?? ''}
                   isDownloading={isDownloading}
                   downloadError={downloadError}
                   onDownload={downloadBundle}
@@ -258,10 +300,10 @@ function App() {
         <footer className="mt-7 flex flex-col items-start justify-between gap-3 border-t border-white/[0.07] pt-5 text-[11px] text-slate-500 sm:flex-row sm:items-center">
           <p className="flex items-center gap-2">
             <ShieldCheck size={14} className="text-emerald-400/80" aria-hidden="true" />
-            Gemini generates the Arcade config; the 3D model remains mocked.
+            Gemini generates the Arcade config; a matching demo model is selected locally.
           </p>
           <p className="font-semibold tracking-[0.12em] text-slate-600">
-            MOCK 3D · GEMINI CONFIG
+            LOCAL DEMO MODEL · GEMINI CONFIG
           </p>
         </footer>
       </main>
@@ -305,7 +347,7 @@ function IdleOutput() {
         Your next game asset starts here
       </p>
       <p className="mt-2 max-w-xs text-xs leading-5 text-slate-500">
-        Describe an asset to see its mock model and gameplay config appear here.
+        Describe an asset to generate its gameplay config and select a matching demo model.
       </p>
       <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-white/[0.07] bg-white/[0.025] px-3 py-1.5 text-[10px] tracking-wide text-slate-400">
         <span className="size-1.5 rounded-full bg-violet-300" />
@@ -315,7 +357,7 @@ function IdleOutput() {
   )
 }
 
-function LoadingOutput() {
+function LoadingOutput({ step }: { step: LoadingStep }) {
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center py-10 text-center"
@@ -331,14 +373,18 @@ function LoadingOutput() {
         />
       </div>
       <p className="text-sm font-medium text-white">
-        Generating Arcade config...
+        {step === 'config'
+          ? 'Step 1: AI configuring game logic...'
+          : 'Step 2: Preparing a matching demo model...'}
       </p>
       <p className="mt-2 text-xs text-slate-500">
-        Preparing the mock model and your gameplay metadata
+        {step === 'config'
+          ? 'Generating the Arcade config from your asset prompt'
+          : 'Selecting a bundled model to match your prompt'}
       </p>
       <div className="mt-7 flex items-center gap-3">
         <span className="loading-step loading-step-active">
-          <Cuboid size={13} aria-hidden="true" /> MOCK GLB
+          <Cuboid size={13} aria-hidden="true" /> DEMO MODEL
         </span>
         <span className="h-px w-8 bg-white/10" />
         <span className="loading-step">
@@ -355,6 +401,7 @@ function LoadingOutput() {
 
 type SuccessOutputProps = {
   arcadeConfig: ArcadeConfig
+  demoModelPath: string
   isDownloading: boolean
   downloadError: string
   onDownload: () => void
@@ -362,6 +409,7 @@ type SuccessOutputProps = {
 
 function SuccessOutput({
   arcadeConfig,
+  demoModelPath,
   isDownloading,
   downloadError,
   onDownload,
@@ -374,7 +422,7 @@ function SuccessOutput({
         </span>
         Bundle generated
         <span className="ml-auto inline-flex items-center gap-1 rounded-md border border-amber-300/15 bg-amber-300/[0.05] px-2 py-1 text-[9px] font-semibold tracking-wider text-amber-200/80">
-          MOCK ASSET
+          DEMO MODEL
         </span>
       </div>
 
@@ -399,13 +447,13 @@ function SuccessOutput({
 
       <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-300/10 bg-amber-300/[0.035] px-3 py-2.5 text-[10px] leading-4 text-amber-100/70">
         <CircleHelp size={14} className="shrink-0 text-amber-200/80" aria-hidden="true" />
-        barrel.glb is a text placeholder, not a valid or importable 3D model.
+        This bundle uses a pre-made demo model selected to match your prompt.
       </div>
 
       <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-[10px] text-slate-400">
         <span className="inline-flex items-center gap-1.5">
           <Cuboid size={13} className="text-violet-300/80" aria-hidden="true" />
-          barrel.glb
+          {demoModelPath.split('/').at(-1)}
         </span>
         <span className="inline-flex items-center gap-1.5">
           <FileCode2 size={13} className="text-violet-300/80" aria-hidden="true" />
