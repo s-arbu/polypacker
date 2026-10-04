@@ -14,4 +14,6 @@ _Avoid_: Model settings
 
 **Demo model**:
 A pre-made 3D asset selected to represent the result of a prompt-driven model-generation step in the hackathon demo.
-_Avoid_: Generated model
+
+**Generated model**:
+A 3D model created by a 3D-generation service from the user's asset prompt.

@@ -15,22 +15,19 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { saveAs } from 'file-saver'
-import { createArcadeBundle } from './arcadeBundle'
+import { createArcadeBundle, type BundleModel } from './arcadeBundle'
 import { isArcadeConfig, type ArcadeConfig } from './arcadeConfig'
 import { getMockModelPath } from './demoModel'
 
 type GenerationState = 'idle' | 'loading' | 'success'
-type LoadingStep = 'config' | 'model'
+type LoadingStep = 'config' | 'model' | 'fallback'
 const maximumPromptLength = 500
 const demoModelLatencyMs = 3_000
 
 function App() {
   const [prompt, setPrompt] = useState('')
   const [arcadeConfig, setArcadeConfig] = useState<ArcadeConfig | null>(null)
-  const [demoModel, setDemoModel] = useState<{
-    blob: Blob
-    path: string
-  } | null>(null)
+  const [bundleModel, setBundleModel] = useState<BundleModel | null>(null)
   const [generationState, setGenerationState] =
     useState<GenerationState>('idle')
   const [loadingStep, setLoadingStep] = useState<LoadingStep>('config')
@@ -57,7 +54,7 @@ function App() {
     setGenerationError('')
     setDownloadError('')
     setArcadeConfig(null)
-    setDemoModel(null)
+    setBundleModel(null)
     setLoadingStep('config')
     setGenerationState('loading')
 
@@ -84,26 +81,59 @@ function App() {
       }
 
       setLoadingStep('model')
-      const modelPath = getMockModelPath(prompt.trim())
-      const modelFetch = fetch(modelPath)
-      const minimumLatency = new Promise<void>((resolve) => {
-        setTimeout(resolve, demoModelLatencyMs)
-      })
-      const modelResponse = await modelFetch
-      if (!modelResponse.ok) {
-        throw new Error(
-          `Could not fetch the selected demo model (${modelResponse.status}).`,
-        )
-      }
-      const [model] = await Promise.all([
-        modelResponse.blob(),
-        minimumLatency,
-      ])
-      if (!model || model.size === 0) {
-        throw new Error('Could not fetch the selected demo model.')
-      }
-      setDemoModel({ blob: model, path: modelPath })
+      let model: BundleModel
+      try {
+        const modelResponse = await fetch('/api/hyper3d', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: prompt.trim() }),
+          signal: AbortSignal.timeout(60_000),
+        })
+        if (!modelResponse.ok) {
+          const errorBody: unknown = await modelResponse.json()
+          const message =
+            typeof errorBody === 'object' &&
+            errorBody !== null &&
+            'error' in errorBody &&
+            typeof errorBody.error === 'string'
+              ? errorBody.error
+              : `Hyper3D request failed (${modelResponse.status}).`
+          throw new Error(message)
+        }
 
+        const blob = await modelResponse.blob()
+        const filename = modelResponse.headers.get('X-Model-Filename')
+        if (!blob.size || !filename || !filename.toLowerCase().endsWith('.glb')) {
+          throw new Error('Hyper3D returned an invalid model file.')
+        }
+        model = { blob, filename, source: 'Hyper3D' }
+      } catch (error) {
+        console.warn('Hyper3D failed; using a local demo model.', error)
+        setLoadingStep('fallback')
+        const modelPath = getMockModelPath(prompt.trim())
+        const minimumLatency = new Promise<void>((resolve) => {
+          setTimeout(resolve, demoModelLatencyMs)
+        })
+        const [blob] = await Promise.all([
+          fetch(modelPath).then((modelResponse) => {
+            if (!modelResponse.ok) {
+              throw new Error(
+                `Could not fetch the selected demo model (${modelResponse.status}).`,
+              )
+            }
+            return modelResponse.blob()
+          }),
+          minimumLatency,
+        ])
+        if (!blob.size) {
+          throw new Error('Could not fetch the selected demo model.')
+        }
+        const filename = modelPath.split('/').at(-1)
+        if (!filename) throw new Error('The selected demo model has no filename.')
+        model = { blob, filename, path: modelPath, source: 'demo' }
+      }
+
+      setBundleModel(model)
       setArcadeConfig(result)
       setGenerationState('success')
     } catch (error) {
@@ -125,15 +155,8 @@ function App() {
       if (!arcadeConfig) {
         throw new Error('No generated Arcade config is available.')
       }
-      if (!demoModel) throw new Error('No demo model is available.')
-      const modelName = demoModel.path.split('/').at(-1)
-      if (!modelName) throw new Error('The selected demo model has no filename.')
-      const bundle = await createArcadeBundle(
-        arcadeConfig,
-        demoModel.blob,
-        modelName,
-        demoModel.path,
-      )
+      if (!bundleModel) throw new Error('No 3D model is available.')
+      const bundle = await createArcadeBundle(arcadeConfig, bundleModel)
       saveAs(bundle, 'asset-bundle.zip')
     } catch (error) {
       console.error('Unable to create the Arcade asset bundle.', error)
@@ -158,13 +181,13 @@ function App() {
           <div className="flex items-center gap-3">
             <span className="hidden items-center gap-2 border border-cyan-400/25 bg-cyan-400/[0.04] px-3 py-2 font-mono text-[10px] font-medium tracking-[0.08em] text-cyan-100/80 sm:flex">
               <span className="size-1.5 bg-cyan-300" />
-              DEMO MODEL / GEMINI CONFIG
+              HYPER3D + LOCAL FALLBACK / GEMINI CONFIG
             </span>
             <button
               type="button"
               className="flex size-9 items-center justify-center border border-white/10 bg-white/[0.03] text-zinc-400 transition-colors hover:border-cyan-300/50 hover:text-cyan-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
               aria-label="About this demo"
-              title="Gemini generates the Arcade config; a prompt-matched demo model is selected locally."
+              title="Gemini generates the Arcade config; Hyper3D generates the model with a local demo fallback."
             >
               <CircleHelp size={18} aria-hidden="true" />
             </button>
@@ -184,7 +207,7 @@ function App() {
               <span className="block text-cyan-300">asset booster</span>
             </h1>
             <p className="mt-4 max-w-2xl text-sm leading-7 text-zinc-400 sm:text-base">
-              Turn an asset idea into an Arcade config and a bundle with a matching demo model.
+              Turn an asset idea into an Arcade config and a 3D model bundle.
             </p>
           </div>
           <div className="hidden items-center gap-3 border-l border-cyan-300/40 pl-5 lg:flex">
@@ -294,7 +317,7 @@ function App() {
               {generationState === 'success' && arcadeConfig && (
                 <SuccessOutput
                   arcadeConfig={arcadeConfig}
-                  demoModelPath={demoModel?.path ?? ''}
+                  model={bundleModel}
                   isDownloading={isDownloading}
                   downloadError={downloadError}
                   onDownload={downloadBundle}
@@ -325,14 +348,14 @@ function App() {
               <Layers3 size={20} className="mb-5 text-cyan-300" aria-hidden="true" />
               <h3 className="text-base font-bold text-zinc-100">Config and model</h3>
               <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-400">
-                Gemini creates the Arcade config. PolyPacker selects a matching pre-made model from its bundled assets.
+                Gemini creates the Arcade config and Hyper3D generates the model, with bundled demo assets as fallback.
               </p>
             </article>
             <article className="py-6 pl-5 md:py-7">
               <ArrowDownToLine size={20} className="mb-5 text-cyan-300" aria-hidden="true" />
               <h3 className="text-base font-bold text-zinc-100">Arcade ready</h3>
               <p className="mt-2 max-w-xs text-sm leading-6 text-zinc-400">
-                Download a ZIP with the config, selected demo model, and README.
+                Download a ZIP with the config, generated model or demo fallback, and README.
               </p>
             </article>
           </div>
@@ -341,10 +364,10 @@ function App() {
         <footer className="mt-7 flex flex-col items-start justify-between gap-3 border-t border-white/[0.08] pt-5 text-[11px] text-zinc-500 sm:flex-row sm:items-center">
           <p className="flex items-center gap-2">
             <ShieldCheck size={14} className="text-zinc-500" aria-hidden="true" />
-            Gemini generates the Arcade config; a matching demo model is selected locally.
+            Gemini generates the Arcade config; Hyper3D generates the model with a local fallback.
           </p>
           <p className="font-medium tracking-[0.1em] text-zinc-600">
-            LOCAL DEMO MODEL · GEMINI CONFIG
+            HYPER3D + LOCAL FALLBACK · GEMINI CONFIG
           </p>
         </footer>
       </main>
@@ -416,20 +439,24 @@ function LoadingOutput({ step }: { step: LoadingStep }) {
       <p className="text-sm font-medium text-zinc-100">
         {step === 'config'
           ? 'Step 1: AI configuring game logic...'
-          : 'Step 2: Preparing a matching demo model...'}
+          : step === 'model'
+            ? 'Step 2: Polling Hyper3D (this takes a moment)...'
+            : 'Using local demo model fallback...'}
       </p>
       <p className="mt-2 text-xs text-zinc-500">
         {step === 'config'
           ? 'Generating the Arcade config from your asset prompt'
-          : 'Selecting a bundled model to match your prompt'}
+          : step === 'model'
+            ? 'Submitting and checking the generated 3D model'
+            : 'Hyper3D was unavailable; selecting a bundled model'}
       </p>
       <div className="mt-7 flex items-center gap-3">
         <span
           className={`inline-flex items-center gap-1.5 text-[9px] font-medium tracking-[0.06em] ${
-            step === 'model' ? 'text-cyan-300' : 'text-zinc-600'
+            step === 'config' ? 'text-zinc-600' : 'text-cyan-300'
           }`}
         >
-          <Cuboid size={13} aria-hidden="true" /> DEMO MODEL
+          <Cuboid size={13} aria-hidden="true" /> {step === 'fallback' ? 'DEMO MODEL' : 'HYPER3D MODEL'}
         </span>
         <span className="h-px w-8 bg-white/10" />
         <span
@@ -450,7 +477,7 @@ function LoadingOutput({ step }: { step: LoadingStep }) {
 
 type SuccessOutputProps = {
   arcadeConfig: ArcadeConfig
-  demoModelPath: string
+  model: BundleModel | null
   isDownloading: boolean
   downloadError: string
   onDownload: () => void
@@ -458,7 +485,7 @@ type SuccessOutputProps = {
 
 function SuccessOutput({
   arcadeConfig,
-  demoModelPath,
+  model,
   isDownloading,
   downloadError,
   onDownload,
@@ -471,7 +498,7 @@ function SuccessOutput({
         </span>
         Bundle generated
         <span className="ml-auto inline-flex items-center gap-1 border border-cyan-300/20 px-2 py-1 font-mono text-[9px] font-medium tracking-wider text-cyan-100/80">
-          DEMO MODEL
+          {model?.source === 'Hyper3D' ? 'HYPER3D MODEL' : 'DEMO MODEL'}
         </span>
       </div>
 
@@ -494,15 +521,17 @@ function SuccessOutput({
         </pre>
       </div>
 
-      <div className="mt-3 flex items-center gap-2 border-l-2 border-cyan-300/50 bg-white/[0.025] px-3 py-2.5 text-[10px] leading-4 text-zinc-400">
-        <CircleHelp size={14} className="shrink-0 text-zinc-500" aria-hidden="true" />
-        This bundle uses a pre-made demo model selected to match your prompt.
-      </div>
+      {model?.source === 'demo' && (
+        <div className="mt-3 flex items-center gap-2 border-l-2 border-cyan-300/50 bg-white/[0.025] px-3 py-2.5 text-[10px] leading-4 text-zinc-400">
+          <CircleHelp size={14} className="shrink-0 text-zinc-500" aria-hidden="true" />
+          Hyper3D was unavailable; this pre-made demo model was selected locally.
+        </div>
+      )}
 
       <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-[10px] text-zinc-400">
         <span className="inline-flex items-center gap-1.5">
           <Cuboid size={13} className="text-cyan-300/80" aria-hidden="true" />
-          {demoModelPath.split('/').at(-1)}
+          {model?.filename}
         </span>
         <span className="inline-flex items-center gap-1.5">
           <FileCode2 size={13} className="text-cyan-300/80" aria-hidden="true" />
@@ -531,7 +560,7 @@ function SuccessOutput({
         ) : (
           <ArrowDownToLine size={18} aria-hidden="true" />
         )}
-        {isDownloading ? 'Preparing ZIP...' : 'Download Arcade Bundle (.zip)'}
+        {isDownloading ? 'Packaging Bundle...' : 'Download Arcade Bundle (.zip)'}
       </button>
     </div>
   )

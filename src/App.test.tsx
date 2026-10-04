@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
@@ -14,7 +14,7 @@ describe('Arcade-Ready Asset Booster', () => {
     damage_radius: 5,
     is_pickup: false,
   }
-  const bambooBytes = new Uint8Array([0x62, 0x61, 0x6d, 0x62, 0x6f, 0x6f])
+  const modelBytes = new Uint8Array([0x67, 0x6c, 0x54, 0x46])
   const fetchMock = vi.fn()
 
   beforeEach(() => {
@@ -26,7 +26,6 @@ describe('Arcade-Ready Asset Booster', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
-    vi.useRealTimers()
   })
 
   function mockConfigResponse() {
@@ -36,12 +35,12 @@ describe('Arcade-Ready Asset Booster', () => {
     })
   }
 
-  function mockAssetResponse(path = '/bamboo.glb') {
+  function mockHyper3dResponse(filename = 'model.glb') {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      blob: async () => new Blob([bambooBytes], { type: 'model/gltf-binary' }),
+      headers: { get: (name: string) => name === 'X-Model-Filename' ? filename : null },
+      blob: async () => new Blob([modelBytes], { type: 'model/gltf-binary' }),
     })
-    return path
   }
 
   function enterPrompt(prompt: string) {
@@ -51,68 +50,129 @@ describe('Arcade-Ready Asset Booster', () => {
     fireEvent.click(screen.getByRole('button', { name: /generate asset bundle/i }))
   }
 
-  it('selects local models by case-insensitive whole-word keywords, with bamboo priority', async () => {
-    vi.useFakeTimers()
+  it('requests a Hyper3D model after Gemini returns a valid config', async () => {
     mockConfigResponse()
-    mockAssetResponse()
+    mockHyper3dResponse()
     render(<App />)
-    enterPrompt('A cute GREEN panda')
+    enterPrompt('A copper airship')
 
-    await act(async () => {
-      await Promise.resolve()
-      await vi.advanceTimersByTimeAsync(3_000)
-    })
+    expect(await screen.findByText('prop_explosive')).toBeTruthy()
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/generate',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ prompt: 'A cute GREEN panda' }),
+        body: JSON.stringify({ prompt: 'A copper airship' }),
       }),
     )
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/bamboo.glb')
-
-    expect(screen.getByText('prop_explosive')).toBeTruthy()
-    expect(screen.getByText('bamboo.glb')).toBeTruthy()
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/hyper3d',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ prompt: 'A copper airship' }),
+      }),
+    )
+    expect(screen.getByText('HYPER3D MODEL')).toBeTruthy()
+    expect(screen.getByText('model.glb')).toBeTruthy()
   })
 
-  it('keeps the loading state visible for the full simulated three seconds', async () => {
-    vi.useFakeTimers()
+  it('shows the Hyper3D polling stage until the server returns the model', async () => {
     mockConfigResponse()
-    let finishAssetFetch!: (response: unknown) => void
+    let finishHyper3dRequest!: (response: unknown) => void
     fetchMock.mockReturnValueOnce(
       new Promise((resolve) => {
-        finishAssetFetch = resolve
+        finishHyper3dRequest = resolve
       }),
     )
     render(<App />)
-    enterPrompt('A green lantern')
+    enterPrompt('A silver airship')
 
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(screen.getByText(/step 2: preparing a matching demo model/i)).toBeTruthy()
-
-    finishAssetFetch({
+    expect(
+      await screen.findByText(/step 2: polling hyper3d/i),
+    ).toBeTruthy()
+    finishHyper3dRequest({
       ok: true,
-      blob: async () => new Blob([bambooBytes]),
+      headers: { get: () => 'airship.glb' },
+      blob: async () => new Blob([modelBytes]),
     })
-    await act(async () => {
-      await Promise.resolve()
-      await vi.advanceTimersByTimeAsync(2_999)
-    })
-    expect(screen.getByText(/step 2: preparing a matching demo model/i)).toBeTruthy()
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1)
-    })
-    expect(screen.getByText('prop_explosive')).toBeTruthy()
+    expect(await screen.findByText('airship.glb')).toBeTruthy()
   })
 
-  it('keeps the prompt and does not offer a ZIP when Gemini config generation fails', async () => {
+  it('falls back to the prompt-matched local model and keeps ZIP download working', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mockConfigResponse()
+    fetchMock
+      .mockRejectedValueOnce(new Error('Hyper3D unavailable'))
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: async () =>
+          new Blob([modelBytes], { type: 'model/gltf-binary' }),
+      })
+    render(<App />)
+    enterPrompt('A cute zoo animal')
+
+    expect(
+      await screen.findByText(/using local demo model fallback/i),
+    ).toBeTruthy()
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/capybara.glb')
+    expect(await screen.findByText('capybara.glb', {}, { timeout: 4_000 })).toBeTruthy()
+    expect(screen.getByText('DEMO MODEL')).toBeTruthy()
+    expect(warning).toHaveBeenCalledWith(
+      'Hyper3D failed; using a local demo model.',
+      expect.any(Error),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /download arcade bundle/i }))
+    expect(
+      await screen.findByRole('button', { name: /packaging bundle/i }),
+    ).toBeTruthy()
+    await waitFor(() => expect(saveAs).toHaveBeenCalledTimes(1))
+    const savedFile = vi.mocked(saveAs).mock.calls[0]?.[0]
+    if (!(savedFile instanceof Blob)) throw new Error('Expected a ZIP Blob')
+    const archive = await JSZip.loadAsync(savedFile)
+    expect(Object.keys(archive.files).sort()).toEqual([
+      'README.txt',
+      'arcade-config.json',
+      'capybara.glb',
+    ])
+    expect(await archive.file('README.txt')!.async('string')).toContain(
+      'pre-made demo model',
+    )
+    expect(
+      JSON.parse(await archive.file('arcade-config.json')!.async('string')),
+    ).toEqual(generatedConfig)
+    warning.mockRestore()
+  })
+
+  it('shows an error and blocks ZIP if the local fallback also fails', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockConfigResponse()
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ error: 'Hyper3D timed out.' }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        blob: async () => new Blob(),
+      })
+    render(<App />)
+    enterPrompt('green sticks')
+
+    expect(
+      await screen.findByText(/could not fetch the selected demo model/i),
+    ).toBeTruthy()
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/bamboo.glb')
+    expect(screen.queryByRole('button', { name: /download arcade bundle/i })).toBeNull()
+    expect(saveAs).not.toHaveBeenCalled()
+    warning.mockRestore()
+    error.mockRestore()
+  })
+
+  it('keeps the prompt and blocks ZIP when Gemini config generation fails', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       json: async () => ({ error: 'Gemini configuration generation failed.' }),
@@ -133,66 +193,32 @@ describe('Arcade-Ready Asset Booster', () => {
     expect(saveAs).not.toHaveBeenCalled()
   })
 
-  it('packages the fetched local model and real Gemini config under selected names', async () => {
+  it('packages the Hyper3D model filename, bytes, and real Gemini config', async () => {
     mockConfigResponse()
-    const selectedPath = mockAssetResponse('/capybara.glb')
+    mockHyper3dResponse('generated-crate.glb')
     render(<App />)
-    enterPrompt('A cute animal at the zoo')
+    enterPrompt('A wooden crate')
 
-    expect(
-      await screen.findByText('prop_explosive', {}, { timeout: 4_000 }),
-    ).toBeTruthy()
-      expect(fetchMock).toHaveBeenNthCalledWith(2, selectedPath)
-
-      fireEvent.click(screen.getByRole('button', { name: /download arcade bundle/i }))
+    expect(await screen.findByText('generated-crate.glb')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /download arcade bundle/i }))
     await waitFor(() => expect(saveAs).toHaveBeenCalledTimes(1))
 
     const savedFile = vi.mocked(saveAs).mock.calls[0]?.[0]
-    expect(savedFile).toBeInstanceOf(Blob)
-    expect(vi.mocked(saveAs).mock.calls[0]?.[1]).toBe('asset-bundle.zip')
-    if (!(savedFile instanceof Blob)) throw new Error('Expected a ZIP Blob to be saved')
-
+    if (!(savedFile instanceof Blob)) throw new Error('Expected a ZIP Blob')
     const archive = await JSZip.loadAsync(savedFile)
     expect(Object.keys(archive.files).sort()).toEqual([
       'README.txt',
       'arcade-config.json',
-      'capybara.glb',
+      'generated-crate.glb',
     ])
     expect(
-      Array.from(await archive.file('capybara.glb')!.async('uint8array')),
-    ).toEqual(Array.from(bambooBytes))
+      Array.from(await archive.file('generated-crate.glb')!.async('uint8array')),
+    ).toEqual(Array.from(modelBytes))
+    expect(await archive.file('README.txt')!.async('string')).toContain(
+      'generated with Hyper3D',
+    )
     expect(
       JSON.parse(await archive.file('arcade-config.json')!.async('string')),
     ).toEqual(generatedConfig)
-    expect(await archive.file('README.txt')!.async('string')).toContain(
-      'demo model',
-    )
-    expect(await archive.file('README.txt')!.async('string')).toContain(
-      selectedPath,
-    )
-  })
-
-  it('shows an error and blocks ZIP when the selected local GLB cannot be fetched', async () => {
-    vi.useFakeTimers()
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-    mockConfigResponse()
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      blob: async () => new Blob(),
-    })
-    render(<App />)
-    enterPrompt('green sticks')
-
-    await act(async () => {
-      await Promise.resolve()
-      await vi.advanceTimersByTimeAsync(0)
-    })
-
-    expect(screen.getByText(/could not fetch the selected demo model/i)).toBeTruthy()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(screen.queryByRole('button', { name: /download arcade bundle/i })).toBeNull()
-    expect(saveAs).not.toHaveBeenCalled()
-    error.mockRestore()
   })
 })
