@@ -3,6 +3,7 @@ import type { BundleModel } from './arcadeBundle'
 const maximumGenerationWaitMs = 5 * 60_000
 const pollIntervalMs = 5_000
 const requestTimeoutMs = 30_000
+const maximumPollRetries = 3
 
 type Hyper3dClientDependencies = {
   fetch?: typeof fetch
@@ -69,15 +70,25 @@ export async function generateHyper3dModel(
 
   const deadline = now() + maximumGenerationWaitMs
   let nextPollDelayMs = 0
+  let consecutivePollFailures = 0
   while (now() < deadline) {
     const remainingMs = deadline - now()
     await waitFor(Math.max(0, Math.min(nextPollDelayMs, remainingMs)))
 
-    const statusResponse = await fetcher('/api/hyper3d-status', {
-      ...createRequestOptions(),
-      body: JSON.stringify({ taskToken: submission.taskToken }),
-    })
+    let statusResponse: Response
+    try {
+      statusResponse = await fetcher('/api/hyper3d-status', {
+        ...createRequestOptions(),
+        body: JSON.stringify({ taskToken: submission.taskToken }),
+      })
+    } catch (error) {
+      consecutivePollFailures += 1
+      if (consecutivePollFailures > maximumPollRetries) throw error
+      nextPollDelayMs = pollIntervalMs
+      continue
+    }
     if (statusResponse.status === 202) {
+      consecutivePollFailures = 0
       const retryAfterHeader = statusResponse.headers.get('Retry-After')
       const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN
       nextPollDelayMs =
@@ -87,12 +98,18 @@ export async function generateHyper3dModel(
       continue
     }
     if (!statusResponse.ok) {
-      throw new Error(
-        await readError(
-          statusResponse,
-          `Hyper3D status check failed (${statusResponse.status}).`,
-        ),
-      )
+      consecutivePollFailures += 1
+      if (
+        [502, 503, 504].includes(statusResponse.status) &&
+        consecutivePollFailures <= maximumPollRetries
+      ) {
+        nextPollDelayMs = pollIntervalMs
+        continue
+      }
+      throw new Error(await readError(
+        statusResponse,
+        `Hyper3D status check failed (${statusResponse.status}).`,
+      ))
     }
 
     const blob = await statusResponse.blob()

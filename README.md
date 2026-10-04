@@ -41,7 +41,8 @@ PolyPacker uses a live 3D generation API with a deterministic local fallback:
 - **Live Hyper3D generation:** A server-side Nitro endpoint submits a Rodin
   generation job. The browser checks its status through short server requests
   and downloads the generated `.glb` when it is ready, avoiding one long-lived
-  server request during generation.
+  server request during generation. Temporary poll/download connection errors
+  are retried using the same task instead of submitting another paid job.
 - **Local demo fallback:** If Hyper3D is unavailable, fails, or is still
   processing after five minutes, the app fetches a pre-made `.glb` from
   `public/` based on the prompt. The result identifies the included model's

@@ -251,6 +251,7 @@ export async function handleHyper3dStatusRequest(
   const task = await decryptTaskToken(body.taskToken, apiKey)
   if (!task) return jsonError('The Hyper3D task token is invalid.', 400)
 
+  let stage = 'checking generation status'
   const fetcher = dependencies.fetch ?? fetch
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -291,27 +292,40 @@ export async function handleHyper3dStatusRequest(
           : [],
       ),
     )
-    const jobStatuses = task.jobIds.map((jobId) => statusesById.get(jobId))
+    const jobStatuses = task.jobIds.map((jobId) =>
+      statusesById.get(jobId)?.toLowerCase(),
+    )
     if (jobStatuses.some((jobStatus) => jobStatus === undefined)) {
       throw new Error('Hyper3D returned an incomplete job status.')
     }
-    if (jobStatuses.includes('Failed')) {
-      throw new Error('Hyper3D failed to generate the model.')
+    if (jobStatuses.includes('failed')) {
+      return jsonError('Hyper3D failed to generate this model.', 422)
+    }
+    if (
+      jobStatuses.includes('terminated') ||
+      jobStatuses.includes('canceled') ||
+      jobStatuses.includes('cancelled')
+    ) {
+      return jsonError(
+        'Hyper3D terminated this model-generation job.',
+        422,
+      )
     }
     if (
       jobStatuses.some(
         (jobStatus) =>
-          jobStatus !== 'Waiting' &&
-          jobStatus !== 'Generating' &&
-          jobStatus !== 'Done',
+          jobStatus !== 'waiting' &&
+          jobStatus !== 'generating' &&
+          jobStatus !== 'done',
       )
     ) {
       throw new Error('Hyper3D returned an unknown job status.')
     }
-    if (!jobStatuses.every((jobStatus) => jobStatus === 'Done')) {
+    if (!jobStatuses.every((jobStatus) => jobStatus === 'done')) {
       return Response.json({ status: 'processing' }, { status: 202 })
     }
 
+    stage = 'looking up the generated model'
     const downloadResponse = await fetcher(`${apiBaseUrl}/download`, {
       method: 'POST',
       headers,
@@ -325,6 +339,7 @@ export async function handleHyper3dStatusRequest(
     const file = getGlbFile(await readJson(downloadResponse))
     if (!file) throw new Error('Hyper3D did not return a downloadable GLB.')
 
+    stage = 'downloading the generated GLB'
     const modelResponse = await fetcher(file.url)
     if (!modelResponse.ok) {
       throw new Error(`Hyper3D model download failed (${modelResponse.status}).`)
@@ -340,13 +355,10 @@ export async function handleHyper3dStatusRequest(
       },
     })
   } catch (error) {
-    console.error('Hyper3D model status check failed.', error)
-    return jsonError(
-      error instanceof Error
-        ? error.message
-        : 'Hyper3D model status check failed.',
-      502,
-    )
+    const reason =
+      error instanceof Error ? error.message : 'Unknown upstream error.'
+    console.error(`Hyper3D ${stage} failed.`, error)
+    return jsonError(`Hyper3D ${stage} failed: ${reason}`, 502)
   }
 }
 

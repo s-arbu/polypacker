@@ -163,6 +163,63 @@ describe('Hyper3D generation routes', () => {
     expect(response.headers.get('Retry-After')).toBe('30')
   })
 
+  it('reports a provider-terminated job as terminal instead of an unknown status', async () => {
+    vi.stubEnv('HYPER3D_API_KEY', 'test-key')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(submittedTask, 201))
+    const submission = await handleHyper3dRequest(
+      createRequest('/api/hyper3d', { prompt: 'barrel' }),
+      { fetch: fetcher },
+    )
+    const { taskToken } = await submission.json()
+    fetcher.mockResolvedValueOnce(
+      jsonResponse({
+        jobs: [
+          { uuid: 'job-1', status: 'Terminated' },
+          { uuid: 'job-2', status: 'Done' },
+        ],
+      }),
+    )
+
+    const response = await handleHyper3dStatusRequest(
+      createRequest('/api/hyper3d-status', { taskToken }),
+      { fetch: fetcher },
+    )
+
+    expect(response.status).toBe(422)
+    expect(await response.json()).toEqual({
+      error: 'Hyper3D terminated this model-generation job.',
+    })
+    error.mockRestore()
+  })
+
+  it('reports which poll stage was terminated by the upstream connection', async () => {
+    vi.stubEnv('HYPER3D_API_KEY', 'test-key')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(submittedTask, 201))
+    const submission = await handleHyper3dRequest(
+      createRequest('/api/hyper3d', { prompt: 'barrel' }),
+      { fetch: fetcher },
+    )
+    const { taskToken } = await submission.json()
+    fetcher.mockRejectedValueOnce(new Error('terminated'))
+
+    const response = await handleHyper3dStatusRequest(
+      createRequest('/api/hyper3d-status', { taskToken }),
+      { fetch: fetcher },
+    )
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      error: 'Hyper3D checking generation status failed: terminated',
+    })
+    error.mockRestore()
+  })
+
   it('rejects a tampered task token without calling Hyper3D', async () => {
     vi.stubEnv('HYPER3D_API_KEY', 'test-key')
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
