@@ -22,7 +22,7 @@ export function isArcadeConfig(value: unknown): value is ArcadeConfig {
 
   return (
     Object.keys(config).length === expectedKeys.length &&
-    expectedKeys.every((key) => Object.hasOwn(config, key)) &&
+    expectedKeys.every((key) => Object.prototype.hasOwnProperty.call(config, key)) &&
     typeof config.type === 'string' &&
     config.type.trim().length > 0 &&
     typeof config.collider === 'string' &&

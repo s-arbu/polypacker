@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai'
 import { defineHandler } from 'nitro'
-import { isArcadeConfig } from '../src/arcadeConfig'
+import { isArcadeConfig } from '../src/arcadeConfig.js'
 
 const arcadeConfigSchema = {
   type: 'object',
