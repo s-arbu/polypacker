@@ -4,8 +4,8 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  color: #f1f2f8;
-  background: #090a0f;
+  color: #f1f5f5;
+  background: #090d10;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -20,7 +20,7 @@
 
 body {
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
 }
 
@@ -34,6 +34,6 @@ button {
 }
 
 ::selection {
-  color: #fff;
-  background: rgb(139 92 246 / 45%);
+  color: #071114;
+  background: #67e8f9;
 }
