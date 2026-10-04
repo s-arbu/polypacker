@@ -33,6 +33,7 @@ function App() {
   const [loadingStep, setLoadingStep] = useState<LoadingStep>('config')
   const [promptError, setPromptError] = useState('')
   const [generationError, setGenerationError] = useState('')
+  const [modelFallbackReason, setModelFallbackReason] = useState('')
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState('')
 
@@ -52,6 +53,7 @@ function App() {
 
     setPromptError('')
     setGenerationError('')
+    setModelFallbackReason('')
     setDownloadError('')
     setArcadeConfig(null)
     setBundleModel(null)
@@ -109,6 +111,9 @@ function App() {
         model = { blob, filename, source: 'Hyper3D' }
       } catch (error) {
         console.warn('Hyper3D failed; using a local demo model.', error)
+        setModelFallbackReason(
+          error instanceof Error ? error.message : 'Unknown Hyper3D error.',
+        )
         setLoadingStep('fallback')
         const modelPath = getMockModelPath(prompt.trim())
         const minimumLatency = new Promise<void>((resolve) => {
@@ -318,6 +323,7 @@ function App() {
                 <SuccessOutput
                   arcadeConfig={arcadeConfig}
                   model={bundleModel}
+                  modelFallbackReason={modelFallbackReason}
                   isDownloading={isDownloading}
                   downloadError={downloadError}
                   onDownload={downloadBundle}
@@ -478,6 +484,7 @@ function LoadingOutput({ step }: { step: LoadingStep }) {
 type SuccessOutputProps = {
   arcadeConfig: ArcadeConfig
   model: BundleModel | null
+  modelFallbackReason: string
   isDownloading: boolean
   downloadError: string
   onDownload: () => void
@@ -486,6 +493,7 @@ type SuccessOutputProps = {
 function SuccessOutput({
   arcadeConfig,
   model,
+  modelFallbackReason,
   isDownloading,
   downloadError,
   onDownload,
@@ -521,10 +529,32 @@ function SuccessOutput({
         </pre>
       </div>
 
-      {model?.source === 'demo' && (
-        <div className="mt-3 flex items-center gap-2 border-l-2 border-cyan-300/50 bg-white/[0.025] px-3 py-2.5 text-[10px] leading-4 text-zinc-400">
-          <CircleHelp size={14} className="shrink-0 text-zinc-500" aria-hidden="true" />
-          Hyper3D was unavailable; this pre-made demo model was selected locally.
+      {model && (
+        <div
+          className={`mt-3 flex items-start gap-2 border-l-2 px-3 py-2.5 text-[10px] leading-4 ${
+            model.source === 'demo'
+              ? 'border-amber-300 bg-amber-300/[0.08] text-amber-100'
+              : 'border-emerald-300 bg-emerald-300/[0.06] text-emerald-100'
+          }`}
+          role="status"
+          aria-label="Model source"
+        >
+          <CircleHelp
+            size={14}
+            className="mt-0.5 shrink-0"
+            aria-hidden="true"
+          />
+          {model.source === 'demo' ? (
+            <span>
+              <strong>Demo fallback included: {model.filename}.</strong> This
+              is a pre-made local model; Hyper3D did not generate a model for
+              this run. Reason: {modelFallbackReason}.
+            </span>
+          ) : (
+            <span>
+              <strong>Hyper3D generated model included: {model.filename}.</strong>
+            </span>
+          )}
         </div>
       )}
 
