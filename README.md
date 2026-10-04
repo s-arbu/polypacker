@@ -39,12 +39,14 @@ PolyPacker uses a live 3D generation API with a deterministic local fallback:
   endpoint, which returns schema-constrained JSON. The server validates the
   response before it is used in the bundle.
 - **Live Hyper3D generation:** A server-side Nitro endpoint submits a Rodin
-  generation job, polls until it finishes, and downloads the generated `.glb`.
-- **Local demo fallback:** If Hyper3D is unavailable, fails, or exceeds the
-  60-second deadline, the app fetches a pre-made `.glb` from `public/` based on
-  the prompt. The result identifies the included model's source and displays
-  the Hyper3D failure reason; Gemini failures remain visible and do not produce
-  a ZIP.
+  generation job. The browser checks its status through short server requests
+  and downloads the generated `.glb` when it is ready, avoiding one long-lived
+  server request during generation.
+- **Local demo fallback:** If Hyper3D is unavailable, fails, or is still
+  processing after five minutes, the app fetches a pre-made `.glb` from
+  `public/` based on the prompt. The result identifies the included model's
+  source and displays the Hyper3D failure reason; Gemini failures remain
+  visible and do not produce a ZIP.
 
 Both API keys are kept server-side; the browser calls the Nitro routes, not the
 provider APIs directly.

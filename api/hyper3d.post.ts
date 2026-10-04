@@ -1,55 +1,25 @@
 import { defineHandler } from 'nitro'
 
 const apiBaseUrl = 'https://api.hyper3d.com/api/v2'
-const generationTimeoutMs = 60_000
-const initialPollDelayMs = 5_000
-const maximumPollDelayMs = 30_000
+const maximumRetryAfterMs = 30_000
 
 type Hyper3dDependencies = {
   fetch?: typeof fetch
-  now?: () => number
-  wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>
+}
+
+type Hyper3dTask = {
+  uuid: string
+  jobIds: string[]
+  subscriptionKey: string
 }
 
 type RodinSubmission = {
   uuid: string
-  jobs: {
-    uuids: string[]
-    subscription_key: string
-  }
+  jobs: { uuids: string[]; subscription_key: string }
 }
 
 function jsonError(error: string, status: number): Response {
   return Response.json({ error }, { status })
-}
-
-function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new Error('Hyper3D generation timed out.'))
-      return
-    }
-
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, milliseconds)
-
-    function onAbort() {
-      clearTimeout(timer)
-      reject(new Error('Hyper3D generation timed out.'))
-    }
-
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
-function parseRetryAfter(value: string | null, now: number): number | null {
-  if (!value) return null
-  const seconds = Number(value)
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
-  const date = Date.parse(value)
-  return Number.isNaN(date) ? null : Math.max(0, date - now)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,6 +47,80 @@ function isRodinSubmission(value: unknown): value is RodinSubmission {
       (jobId) => typeof jobId === 'string' && jobId.length > 0,
     )
   )
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
+function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
+  const base64 = value.replaceAll('-', '+').replaceAll('_', '/')
+  const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length))
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes
+}
+
+async function getTaskTokenKey(apiKey: string): Promise<CryptoKey> {
+  const keyMaterial = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(apiKey),
+  )
+  return crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, [
+    'encrypt',
+    'decrypt',
+  ])
+}
+
+async function encryptTaskToken(task: Hyper3dTask, apiKey: string): Promise<string> {
+  const iv = new Uint8Array(new ArrayBuffer(12))
+  crypto.getRandomValues(iv)
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    await getTaskTokenKey(apiKey),
+    new TextEncoder().encode(JSON.stringify(task)),
+  )
+  return `${toBase64Url(iv)}.${toBase64Url(new Uint8Array(encrypted))}`
+}
+
+async function decryptTaskToken(
+  token: string,
+  apiKey: string,
+): Promise<Hyper3dTask | null> {
+  try {
+    const [ivString, encryptedString, extra] = token.split('.')
+    if (!ivString || !encryptedString || extra !== undefined) return null
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromBase64Url(ivString) },
+      await getTaskTokenKey(apiKey),
+      fromBase64Url(encryptedString),
+    )
+    const task: unknown = JSON.parse(new TextDecoder().decode(decrypted))
+    if (
+      !isRecord(task) ||
+      typeof task.uuid !== 'string' ||
+      typeof task.subscriptionKey !== 'string' ||
+      !Array.isArray(task.jobIds) ||
+      !task.jobIds.every((jobId) => typeof jobId === 'string')
+    ) {
+      return null
+    }
+    return task as Hyper3dTask
+  } catch {
+    return null
+  }
+}
+
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? null : Math.max(0, date - Date.now())
 }
 
 function getGlbFile(value: unknown): { name: string; url: string } | null {
@@ -116,7 +160,6 @@ export async function handleHyper3dRequest(
     console.error('Invalid JSON in Hyper3D request.', error)
     return jsonError('Send a valid JSON request body.', 400)
   }
-
   if (!isRecord(body) || typeof body.prompt !== 'string') {
     return jsonError('Provide an asset prompt.', 400)
   }
@@ -133,19 +176,7 @@ export async function handleHyper3dRequest(
   }
 
   const fetcher = dependencies.fetch ?? fetch
-  const now = dependencies.now ?? Date.now
-  const waitFor = dependencies.wait ?? wait
-  const controller = new AbortController()
-  let timeoutId: ReturnType<typeof setTimeout>
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      controller.abort()
-      reject(new Error('Hyper3D generation exceeded the 60-second timeout.'))
-    }, generationTimeoutMs)
-  })
-  const headers = { Authorization: `Bearer ${apiKey}` }
-
-  async function generateModel(): Promise<Response> {
+  try {
     const form = new FormData()
     form.set('prompt', prompt)
     form.set('tier', 'Gen-2.5-Extreme-Low')
@@ -153,111 +184,150 @@ export async function handleHyper3dRequest(
     form.set('quality', 'medium')
     form.set('geometry_file_format', 'glb')
 
-    const submissionResponse = await fetcher(`${apiBaseUrl}/rodin`, {
+    const response = await fetcher(`${apiBaseUrl}/rodin`, {
       method: 'POST',
-      headers,
+      headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-      signal: controller.signal,
     })
-    if (!submissionResponse.ok) {
+    if (!response.ok) {
+      throw new Error(`Hyper3D generation request failed (${response.status}).`)
+    }
+    const result = await readJson(response)
+    if (isRecord(result) && typeof result.error === 'string') {
       throw new Error(
-        `Hyper3D generation request failed (${submissionResponse.status}).`,
+        typeof result.message === 'string' ? result.message : result.error,
       )
     }
-
-    const submission = await readJson(submissionResponse)
-    if (isRecord(submission) && typeof submission.error === 'string') {
-      throw new Error(
-        typeof submission.message === 'string'
-          ? submission.message
-          : submission.error,
-      )
-    }
-    if (!isRodinSubmission(submission)) {
+    if (!isRodinSubmission(result)) {
       throw new Error('Hyper3D returned an invalid generation task.')
     }
 
-    let pollDelay = initialPollDelayMs
-    while (true) {
-      await waitFor(pollDelay, controller.signal)
-      const statusResponse = await fetcher(`${apiBaseUrl}/status`, {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          subscription_key: submission.jobs.subscription_key,
-        }),
-        signal: controller.signal,
-      })
-      if (statusResponse.status === 429) {
-        const retryAfter = parseRetryAfter(
-          statusResponse.headers.get('Retry-After'),
-          now(),
-        )
-        pollDelay = Math.min(
-          retryAfter ?? pollDelay,
-          maximumPollDelayMs,
-        )
-        continue
-      }
-      if (!statusResponse.ok) {
-        throw new Error(
-          `Hyper3D status check failed (${statusResponse.status}).`,
-        )
-      }
+    const taskToken = await encryptTaskToken(
+      {
+        uuid: result.uuid,
+        jobIds: result.jobs.uuids,
+        subscriptionKey: result.jobs.subscription_key,
+      },
+      apiKey,
+    )
+    return Response.json({ taskToken }, { status: 202 })
+  } catch (error) {
+    console.error('Hyper3D model submission failed.', error)
+    return jsonError(
+      error instanceof Error ? error.message : 'Hyper3D model submission failed.',
+      502,
+    )
+  }
+}
 
-      const status = await readJson(statusResponse)
-      if (!isRecord(status) || !Array.isArray(status.jobs)) {
-        throw new Error('Hyper3D returned an invalid job status.')
-      }
-      const jobStatuses = status.jobs.map((job) =>
-        isRecord(job) && typeof job.status === 'string' ? job.status : null,
+export async function handleHyper3dStatusRequest(
+  request: Request,
+  dependencies: Hyper3dDependencies = {},
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return jsonError('Method not allowed.', 405)
+  }
+
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch (error) {
+    console.error('Invalid JSON in Hyper3D status request.', error)
+    return jsonError('Send a valid JSON request body.', 400)
+  }
+  if (
+    !isRecord(body) ||
+    typeof body.taskToken !== 'string' ||
+    body.taskToken.length > 8_192
+  ) {
+    return jsonError('Provide a valid Hyper3D task token.', 400)
+  }
+
+  const apiKey = process.env.HYPER3D_API_KEY
+  if (!apiKey) {
+    console.error('HYPER3D_API_KEY is not configured on the server.')
+    return jsonError('Hyper3D is not configured on the server.', 500)
+  }
+  const task = await decryptTaskToken(body.taskToken, apiKey)
+  if (!task) return jsonError('The Hyper3D task token is invalid.', 400)
+
+  const fetcher = dependencies.fetch ?? fetch
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  }
+  try {
+    const statusResponse = await fetcher(`${apiBaseUrl}/status`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ subscription_key: task.subscriptionKey }),
+    })
+    if (statusResponse.status === 429) {
+      const retryAfter = Math.min(
+        parseRetryAfter(statusResponse.headers.get('Retry-After')) ?? 5_000,
+        maximumRetryAfterMs,
       )
-      if (
-        jobStatuses.length !== submission.jobs.uuids.length ||
-        jobStatuses.some((jobStatus) => jobStatus === null)
-      ) {
-        throw new Error('Hyper3D returned an incomplete job status.')
-      }
-      if (jobStatuses.includes('Failed')) {
-        throw new Error('Hyper3D failed to generate the model.')
-      }
-      if (jobStatuses.every((jobStatus) => jobStatus === 'Done')) break
-      if (
-        jobStatuses.some(
-          (jobStatus) =>
-            jobStatus !== 'Waiting' &&
-            jobStatus !== 'Generating' &&
-            jobStatus !== 'Done',
-        )
-      ) {
-        throw new Error('Hyper3D returned an unknown job status.')
-      }
+      return Response.json(
+        { status: 'processing' },
+        { status: 202, headers: { 'Retry-After': String(retryAfter / 1_000) } },
+      )
+    }
+    if (!statusResponse.ok) {
+      throw new Error(
+        `Hyper3D status check failed (${statusResponse.status}).`,
+      )
+    }
 
-      pollDelay = Math.min(pollDelay * 2, maximumPollDelayMs)
+    const status = await readJson(statusResponse)
+    if (!isRecord(status) || !Array.isArray(status.jobs)) {
+      throw new Error('Hyper3D returned an invalid job status.')
+    }
+    const statusesById = new Map(
+      status.jobs.flatMap((job) =>
+        isRecord(job) &&
+        typeof job.uuid === 'string' &&
+        typeof job.status === 'string'
+          ? [[job.uuid, job.status] as const]
+          : [],
+      ),
+    )
+    const jobStatuses = task.jobIds.map((jobId) => statusesById.get(jobId))
+    if (jobStatuses.some((jobStatus) => jobStatus === undefined)) {
+      throw new Error('Hyper3D returned an incomplete job status.')
+    }
+    if (jobStatuses.includes('Failed')) {
+      throw new Error('Hyper3D failed to generate the model.')
+    }
+    if (
+      jobStatuses.some(
+        (jobStatus) =>
+          jobStatus !== 'Waiting' &&
+          jobStatus !== 'Generating' &&
+          jobStatus !== 'Done',
+      )
+    ) {
+      throw new Error('Hyper3D returned an unknown job status.')
+    }
+    if (!jobStatuses.every((jobStatus) => jobStatus === 'Done')) {
+      return Response.json({ status: 'processing' }, { status: 202 })
     }
 
     const downloadResponse = await fetcher(`${apiBaseUrl}/download`, {
       method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_uuid: submission.uuid }),
-      signal: controller.signal,
+      headers,
+      body: JSON.stringify({ task_uuid: task.uuid }),
     })
     if (!downloadResponse.ok) {
       throw new Error(
         `Hyper3D download lookup failed (${downloadResponse.status}).`,
       )
     }
-
     const file = getGlbFile(await readJson(downloadResponse))
     if (!file) throw new Error('Hyper3D did not return a downloadable GLB.')
 
-    const modelResponse = await fetcher(file.url, {
-      signal: controller.signal,
-    })
+    const modelResponse = await fetcher(file.url)
     if (!modelResponse.ok) {
-      throw new Error(
-        `Hyper3D model download failed (${modelResponse.status}).`,
-      )
+      throw new Error(`Hyper3D model download failed (${modelResponse.status}).`)
     }
     const model = await modelResponse.arrayBuffer()
     if (model.byteLength === 0) throw new Error('Hyper3D returned an empty GLB.')
@@ -269,31 +339,14 @@ export async function handleHyper3dRequest(
         'X-Model-Filename': file.name,
       },
     })
-  }
-
-  try {
-    return await Promise.race([generateModel(), timeoutPromise])
   } catch (error) {
-    const timedOut =
-      controller.signal.aborted ||
-      (error instanceof Error &&
-        error.message.includes('60-second timeout'))
-    console.error(
-      timedOut
-        ? 'Hyper3D generation exceeded the 60-second timeout.'
-        : 'Hyper3D model generation failed.',
-      error,
-    )
+    console.error('Hyper3D model status check failed.', error)
     return jsonError(
-      timedOut
-        ? 'Hyper3D generation exceeded the 60-second timeout.'
-        : error instanceof Error
-          ? error.message
-          : 'Hyper3D model generation failed.',
-      timedOut ? 504 : 502,
+      error instanceof Error
+        ? error.message
+        : 'Hyper3D model status check failed.',
+      502,
     )
-  } finally {
-    clearTimeout(timeoutId!)
   }
 }
 

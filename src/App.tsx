@@ -18,6 +18,7 @@ import { saveAs } from 'file-saver'
 import { createArcadeBundle, type BundleModel } from './arcadeBundle'
 import { isArcadeConfig, type ArcadeConfig } from './arcadeConfig'
 import { getMockModelPath } from './demoModel'
+import { generateHyper3dModel } from './hyper3dClient'
 
 type GenerationState = 'idle' | 'loading' | 'success'
 type LoadingStep = 'config' | 'model' | 'fallback'
@@ -85,30 +86,7 @@ function App() {
       setLoadingStep('model')
       let model: BundleModel
       try {
-        const modelResponse = await fetch('/api/hyper3d', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: prompt.trim() }),
-          signal: AbortSignal.timeout(60_000),
-        })
-        if (!modelResponse.ok) {
-          const errorBody: unknown = await modelResponse.json()
-          const message =
-            typeof errorBody === 'object' &&
-            errorBody !== null &&
-            'error' in errorBody &&
-            typeof errorBody.error === 'string'
-              ? errorBody.error
-              : `Hyper3D request failed (${modelResponse.status}).`
-          throw new Error(message)
-        }
-
-        const blob = await modelResponse.blob()
-        const filename = modelResponse.headers.get('X-Model-Filename')
-        if (!blob.size || !filename || !filename.toLowerCase().endsWith('.glb')) {
-          throw new Error('Hyper3D returned an invalid model file.')
-        }
-        model = { blob, filename, source: 'Hyper3D' }
+        model = await generateHyper3dModel(prompt.trim())
       } catch (error) {
         console.warn('Hyper3D failed; using a local demo model.', error)
         setModelFallbackReason(
@@ -446,14 +424,14 @@ function LoadingOutput({ step }: { step: LoadingStep }) {
         {step === 'config'
           ? 'Step 1: AI configuring game logic...'
           : step === 'model'
-            ? 'Step 2: Polling Hyper3D (this takes a moment)...'
+            ? 'Step 2: Hyper3D generating your model...'
             : 'Using local demo model fallback...'}
       </p>
       <p className="mt-2 text-xs text-zinc-500">
         {step === 'config'
           ? 'Generating the Arcade config from your asset prompt'
           : step === 'model'
-            ? 'Submitting and checking the generated 3D model'
+            ? 'Checking progress every few seconds. Generation may take up to five minutes.'
             : 'Hyper3D was unavailable; selecting a bundled model'}
       </p>
       <div className="mt-7 flex items-center gap-3">

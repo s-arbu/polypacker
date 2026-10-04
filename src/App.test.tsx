@@ -38,7 +38,16 @@ describe('Arcade-Ready Asset Booster', () => {
   function mockHyper3dResponse(filename = 'model.glb') {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      headers: { get: (name: string) => name === 'X-Model-Filename' ? filename : null },
+      status: 202,
+      json: async () => ({ taskToken: 'opaque-task-token' }),
+    })
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name: string) =>
+          name === 'X-Model-Filename' ? filename : null,
+      },
       blob: async () => new Blob([modelBytes], { type: 'model/gltf-binary' }),
     })
   }
@@ -76,6 +85,14 @@ describe('Arcade-Ready Asset Booster', () => {
         body: JSON.stringify({ prompt: 'A copper airship' }),
       }),
     )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/hyper3d-status',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ taskToken: 'opaque-task-token' }),
+      }),
+    )
     expect(screen.getByText('HYPER3D MODEL')).toBeTruthy()
     expect(screen.getByText('model.glb')).toBeTruthy()
   })
@@ -83,6 +100,11 @@ describe('Arcade-Ready Asset Booster', () => {
   it('shows the Hyper3D polling stage until the server returns the model', async () => {
     mockConfigResponse()
     let finishHyper3dRequest!: (response: unknown) => void
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 202,
+      json: async () => ({ taskToken: 'opaque-task-token' }),
+    })
     fetchMock.mockReturnValueOnce(
       new Promise((resolve) => {
         finishHyper3dRequest = resolve
@@ -92,7 +114,7 @@ describe('Arcade-Ready Asset Booster', () => {
     enterPrompt('A silver airship')
 
     expect(
-      await screen.findByText(/step 2: polling hyper3d/i),
+      await screen.findByText(/step 2: hyper3d generating your model/i),
     ).toBeTruthy()
     finishHyper3dRequest({
       ok: true,
@@ -106,7 +128,7 @@ describe('Arcade-Ready Asset Booster', () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     mockConfigResponse()
     fetchMock
-      .mockRejectedValueOnce(new Error('Hyper3D unavailable'))
+      .mockRejectedValueOnce(new Error('signal timed out'))
       .mockResolvedValueOnce({
         ok: true,
         blob: async () =>
@@ -124,7 +146,7 @@ describe('Arcade-Ready Asset Booster', () => {
     expect(
       screen.getByRole('status', { name: 'Model source' }).textContent,
     ).toContain(
-      'Demo fallback included: capybara.glb. This is a pre-made local model; Hyper3D did not generate a model for this run. Reason: Hyper3D unavailable.',
+      'Demo fallback included: capybara.glb. This is a pre-made local model; Hyper3D did not generate a model for this run. Reason: signal timed out.',
     )
     expect(warning).toHaveBeenCalledWith(
       'Hyper3D failed; using a local demo model.',
